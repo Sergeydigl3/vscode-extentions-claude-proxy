@@ -31,6 +31,15 @@ RED='\033[0;31m'
 GRAY='\033[0;90m'
 NC='\033[0m'
 
+# Read user input even when piped through curl | bash
+prompt_user() {
+    local prompt="$1"
+    local var
+    echo -en "$prompt" >&2
+    read -r var </dev/tty
+    echo "$var"
+}
+
 echo -e "${CYAN}=== VS Code Gallery Patcher ===${NC}"
 echo -e "${CYAN}Proxy domain: $DOMAIN${NC}"
 
@@ -38,7 +47,7 @@ echo -e "${CYAN}Proxy domain: $DOMAIN${NC}"
 CANDIDATES=()
 
 # 1. vscode-server (remote SSH) — active process
-COMMIT=$(ps aux 2>/dev/null | grep -oP 'Stable-[a-f0-9]+' | head -1 | sed 's/Stable-//')
+COMMIT=$(ps aux 2>/dev/null | grep '[.]vscode-server' | grep -oP 'Stable-\K[a-f0-9]+' | head -1)
 if [ -n "$COMMIT" ]; then
     F="$HOME/.vscode-server/cli/servers/Stable-$COMMIT/server/product.json"
     [ -f "$F" ] && CANDIDATES+=("$F")
@@ -66,7 +75,7 @@ done
 if [ ${#CANDIDATES[@]} -eq 0 ]; then
     while IFS= read -r f; do
         CANDIDATES+=("$f")
-    done < <(find /usr /opt /snap "$HOME" -path "*/resources/app/product.json" -o -path "*/.vscode-server/*/product.json" 2>/dev/null | head -10)
+    done < <(find /usr /opt /snap "$HOME" -path "*/resources/app/product.json" -o -path "*/.vscode-server/*/server/product.json" 2>/dev/null | head -10)
 fi
 
 # --- Nothing found ---
@@ -94,7 +103,6 @@ if [ ${#UNIQUE[@]} -eq 1 ]; then
 else
     echo -e "\n${YELLOW}Found multiple VS Code installations:${NC}"
     for i in "${!UNIQUE[@]}"; do
-        # Label each candidate
         label=""
         case "${UNIQUE[$i]}" in
             */.vscode-server/*) label="(remote server)" ;;
@@ -103,11 +111,10 @@ else
         esac
         echo -e "  ${CYAN}$((i+1)))${NC} ${UNIQUE[$i]} ${GRAY}$label${NC}"
     done
-    echo -en "\n${YELLOW}Select number [1]: ${NC}"
-    read -r sel
+    sel=$(prompt_user "\n${YELLOW}Select number [1]: ${NC}")
     sel=${sel:-1}
     idx=$((sel-1))
-    if [ $idx -lt 0 ] || [ $idx -ge ${#UNIQUE[@]} ]; then
+    if [ "$idx" -lt 0 ] || [ "$idx" -ge ${#UNIQUE[@]} ]; then
         echo -e "${RED}Invalid selection.${NC}"
         exit 1
     fi
@@ -121,8 +128,8 @@ if [ ! -w "$FILE" ]; then
     exec sudo "$0" "$@"
 fi
 
-# --- Read current state ---
-CURRENT=$(grep -oP '"serviceUrl"\s*:\s*"\K[^"]+' "$FILE")
+# --- Read current serviceUrl (only within extensionsGallery block) ---
+CURRENT=$(sed -n '/"extensionsGallery"/,/}/{ s/.*"serviceUrl"\s*:\s*"\([^"]*\)".*/\1/p; }' "$FILE" | head -1)
 echo -e "\n${YELLOW}Current gallery: $CURRENT${NC}"
 
 # --- Helpers ---
@@ -130,13 +137,15 @@ replace_value() {
     local file="$1" key="$2" new_value="$3"
     local escaped_value
     escaped_value=$(echo "$new_value" | sed 's/[&/\]/\\&/g')
-    sed -i "s|\(\"$key\"\s*:\s*\)\"[^\"]*\"|\1\"$escaped_value\"|" "$file"
+    # Replace only within the extensionsGallery block
+    sed -i "/"'"'"extensionsGallery"'"'"/,/}/{s|\(\"$key\"\s*:\s*\)\"[^\"]*\"|\1\"$escaped_value\"|}" "$file"
 }
 
 add_value_after() {
     local file="$1" after_key="$2" new_key="$3" new_value="$4"
 
-    if grep -q "\"$new_key\"" "$file"; then
+    # Check if key already exists in extensionsGallery block
+    if sed -n '/"extensionsGallery"/,/}/p' "$file" | grep -q "\"$new_key\""; then
         replace_value "$file" "$new_key" "$new_value"
         return
     fi
@@ -157,8 +166,7 @@ if ! echo "$CURRENT" | grep -q "marketplace\.visualstudio\.com"; then
 fi
 
 if $IS_PROXY; then
-    echo -en "\n${YELLOW}Restore to Microsoft Marketplace? (y/N): ${NC}"
-    read -r choice
+    choice=$(prompt_user "\n${YELLOW}Restore to Microsoft Marketplace? (y/N): ${NC}")
     if [[ "$choice" =~ ^[Yy]$ ]]; then
         BACKUP="${FILE}.backup_$(date +%Y%m%d_%H%M%S)"
         cp "$FILE" "$BACKUP"
@@ -174,8 +182,7 @@ if $IS_PROXY; then
         exit 0
     fi
 else
-    echo -en "\n${YELLOW}Patch to use proxy? (y/N): ${NC}"
-    read -r choice
+    choice=$(prompt_user "\n${YELLOW}Patch to use proxy? (y/N): ${NC}")
     if [[ "$choice" =~ ^[Yy]$ ]]; then
         BACKUP="${FILE}.backup_$(date +%Y%m%d_%H%M%S)"
         cp "$FILE" "$BACKUP"
@@ -194,7 +201,6 @@ fi
 
 echo -e "\n${GREEN}DONE! $ACTION${NC}"
 
-# Suggest reload method based on context
 if echo "$FILE" | grep -q ".vscode-server"; then
     echo -e "${CYAN}Reload VS Code window: Ctrl+Shift+P → 'Reload Window'${NC}"
 else
